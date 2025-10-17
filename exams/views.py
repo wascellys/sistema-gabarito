@@ -69,6 +69,7 @@ class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def upload_answer_sheet(self, request):
+        request_image = request.data.get('sheet_image')
         serializer = StudentAnswerSheetUploadSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -87,7 +88,7 @@ class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
 
             # Envia para o modelo GPT-4o com visão
             response = client.chat.completions.create(
-                model="gpt-4o-mini",  # ou "gpt-4o" se quiser mais precisão
+                model="gpt-4o",  # ou "gpt-4o" se quiser mais precisão
                 response_format={"type": "json_object"},  # 🔥 força o modelo a responder com JSON puro
                 messages=[
                     {
@@ -106,10 +107,10 @@ class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
                                 "type": "text",
                                 "text": (
                                     "Analise a imagem de um gabarito de prova. "
-                                    f"Este exame possui {answer_sheet.exam.num_questions} questões "
-                                    f"e {answer_sheet.exam.num_options} alternativas (A, B, C, D...). "
+                                    f"Este exame possui algumas questões "
+                                    f"e alternativas (A, B, C, D, E...). "
                                     "Identifique qual alternativa está marcada em cada questão. "
-                                    "Se algum item estiver em branco, não o inclua. "
+                                    "Se algum item estiver em branco, incluir apenas ''. "
                                     "O JSON deve seguir exatamente este formato:\n\n"
                                     "{ \"sheet_code\": \"CÓDIGO\", \"answers\": { \"1\": \"A\", \"2\": \"B\", ... } }"
                                 )
@@ -147,6 +148,7 @@ class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
             answer_sheet.sheet_image = request.data.get('sheet_image')
 
             answer_sheet.save()
+            answer_sheet.delete()
 
             # Calcula o resultado
             answer_sheet.calculate_result()
