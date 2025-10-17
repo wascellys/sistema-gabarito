@@ -1,0 +1,59 @@
+from rest_framework import serializers
+from .models import Exam, CorrectAnswerSheet, StudentAnswerSheet
+
+
+class ExamSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the Exam model.
+    """
+    answers_correct_sheet_id = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = Exam
+        fields = ['id', 'subject_name', 'num_questions', 'num_options', 'created_at', 'answers_correct_sheet_id']
+        read_only_fields = ['id', 'created_at']
+
+    def get_answers_correct_sheet_id(self, obj):
+        try:
+            return obj.correct_answer_sheet.id
+        except CorrectAnswerSheet.DoesNotExist:
+            return None
+
+
+class CorrectAnswerSheetSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the CorrectAnswerSheet model.
+    """
+    exam_subject = serializers.CharField(source='exam.subject_name', read_only=True)
+
+    class Meta:
+        model = CorrectAnswerSheet
+        fields = ['id', 'exam', 'exam_subject', 'answers', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class StudentAnswerSheetSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the StudentAnswerSheet model.
+    """
+    exam_subject = serializers.CharField(source='exam.subject_name', read_only=True)
+
+    class Meta:
+        model = StudentAnswerSheet
+        fields = [
+            'id', 'exam', 'exam_subject', 'sheet_code', 'student_name',
+            'student_answers', 'correct_items', 'incorrect_items',
+            'accuracy_percentage', 'sheet_image', 'submitted_at'
+        ]
+        read_only_fields = ['id', 'sheet_code', 'correct_items', 'incorrect_items',
+                            'accuracy_percentage', 'submitted_at']
+
+
+class StudentAnswerSheetUploadSerializer(serializers.ModelSerializer):
+    """
+    Serializer for uploading student answer sheets.
+    """
+
+    class Meta:
+        model = StudentAnswerSheet
+        fields = ['exam', 'sheet_image', 'student_name']

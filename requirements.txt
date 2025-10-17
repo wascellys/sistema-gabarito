@@ -1,0 +1,15 @@
+#asgiref
+#charset-normalize
+Django==3.2.25
+django-cors-headers
+djangorestframework
+et_xmlfile
+numpy
+opencv-python-headless
+openpyxl
+packaging
+pillow
+psycopg2-binary
+pytesseract
+reportlab
+sqlparse

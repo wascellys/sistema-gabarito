@@ -1,0 +1,121 @@
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfgen import canvas
+from io import BytesIO
+
+
+def generate_answer_sheet_pdf(exam, quantity=1):
+    """
+    Gera PDF com 2 gabaritos por folha (paisagem, lado a lado).
+    Cada gabarito é vertical, ocupa metade da largura da folha.
+    Itens alinhados com o campo de nome e com espaçamento confortável entre colunas.
+    """
+    from exams.models import StudentAnswerSheet
+
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=landscape(A4))
+    page_width, page_height = landscape(A4)
+
+    # Opções de resposta (A, B, C, D, E...)
+    options = [chr(65 + i) for i in range(exam.num_options)]
+    generated_codes = []
+
+    # Layout: 2 gabaritos por folha
+    margin = 10
+    usable_width = page_width - (margin * 2)
+    sheet_width = (usable_width / 2) - 10
+    sheet_height = page_height - (margin * 2)
+    sheets_per_page = 2
+
+    # Posições iniciais
+    x_start = margin
+    y_start = margin
+    current_on_page = 0
+
+    for i in range(quantity):
+        # Cria o registro no banco para gerar código único
+        answer_sheet = StudentAnswerSheet.objects.create(
+            exam=exam,
+            student_name=None,
+            student_answers=None,
+        )
+        code = answer_sheet.sheet_code
+        generated_codes.append(code)
+
+        # Moldura externa
+        c.setLineWidth(1.2)
+        c.rect(x_start, y_start, sheet_width, sheet_height, stroke=1, fill=0)
+
+        # Cabeçalho
+        title_y = y_start + sheet_height - 30
+        c.setFont("Helvetica-Bold", 16)
+        c.drawCentredString(
+            x_start + sheet_width / 2, title_y, f"Avaliação de {exam.subject_name}"
+        )
+
+        code_y = title_y - 20
+        c.setFont("Helvetica", 11)
+        c.drawString(
+            x_start + 25 , code_y, f"Código: {code}"
+        )
+
+        # Campo de nome
+        name_y = code_y - 20
+        c.setFont("Helvetica", 11)
+        c.drawString(x_start + 25, name_y, "Nome: " + "_" * 45)
+
+        # Área das questões
+        start_y = name_y - 20
+        start_x = x_start + 20
+        line_height = 18
+        circle_radius = 5
+        option_spacing = 28
+        num_q = exam.num_questions
+
+        # Divide em duas colunas internas se tiver mais de 10 questões
+        two_cols = num_q > 10
+        if two_cols:
+            col1 = num_q // 2
+            col2 = num_q - col1
+            # Aumenta o espaçamento entre as colunas para não ficarem próximas
+            col_gap = 55  # antes era ~25
+            col_width = (sheet_width - col_gap - 60) / 2
+        else:
+            col1 = num_q
+            col2 = 0
+            col_width = sheet_width - 70
+
+        def draw_questions(start_num, total, base_x, base_y):
+            """Desenha o conjunto de questões em uma coluna."""
+            y = base_y
+            for q in range(start_num, start_num + total):
+                c.setFont("Helvetica", 10)
+                c.drawString(base_x, y, f"{q:>2}.")  # número da questão alinhado
+                opt_x = base_x + 22
+                for opt in options:
+                    c.circle(opt_x, y + 3, circle_radius, stroke=1, fill=0)
+                    c.drawString(opt_x + 9, y, opt)
+                    opt_x += option_spacing
+                y -= line_height
+            return y
+
+        # Coluna única ou dupla
+        draw_questions(1, col1, start_x, start_y)
+        if two_cols:
+            draw_questions(col1 + 1, col2, start_x + col_width + col_gap, start_y)
+
+        # Próximo gabarito (à direita)
+        current_on_page += 1
+        if current_on_page < sheets_per_page and i < quantity - 1:
+            x_start += sheet_width + 20
+        else:
+            # Nova página
+            if i < quantity - 1:
+                c.showPage()
+                x_start = margin
+                y_start = margin
+                current_on_page = 0
+
+    c.save()
+    buffer.seek(0)
+    return buffer, generated_codes
+

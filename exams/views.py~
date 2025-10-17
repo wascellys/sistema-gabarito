@@ -1,0 +1,204 @@
+import base64
+
+from openai import OpenAI
+from rest_framework import viewsets, status, filters
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.http import HttpResponse
+from rest_framework import viewsets, filters
+from django_filters.rest_framework import DjangoFilterBackend
+
+from config import settings
+from .models import Exam, CorrectAnswerSheet, StudentAnswerSheet
+from .serializers import (
+    ExamSerializer,
+    CorrectAnswerSheetSerializer,
+    StudentAnswerSheetSerializer,
+    StudentAnswerSheetUploadSerializer
+)
+
+import json
+
+client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+
+class ExamViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing exams.
+    """
+    queryset = Exam.objects.all()
+    serializer_class = ExamSerializer
+
+    @action(detail=True, methods=['post'])
+    def generate_answer_sheets_pdf(self, request, pk=None):
+        """
+        Endpoint to generate PDF with blank answer sheets for students.
+        """
+        from .utils.pdf_generator import generate_answer_sheet_pdf
+
+        exam = self.get_object()
+        quantity = int(request.data.get('quantity', 1))
+
+        # Generate the PDF
+        pdf_buffer, generated_codes = generate_answer_sheet_pdf(exam, quantity)
+
+        # Return the PDF as response
+        response = HttpResponse(pdf_buffer.getvalue(), content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="answer_sheets_{exam.subject_name}.pdf"'
+        return response
+
+
+class CorrectAnswerSheetViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing correct answer sheets.
+    """
+    queryset = CorrectAnswerSheet.objects.all()
+    serializer_class = CorrectAnswerSheetSerializer
+
+
+class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing student answer sheets.
+    """
+    queryset = StudentAnswerSheet.objects.all()
+    serializer_class = StudentAnswerSheetSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
+    filterset_fields = ['exam']
+    # ordering_fields = ['accuracy_percentage', 'correct_items', 'incorrect_items']
+    search_fields = ['sheet_code']
+
+    @action(detail=False, methods=['post'])
+    def upload_answer_sheet(self, request):
+        serializer = StudentAnswerSheetUploadSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        answer_sheet = serializer.save()
+
+        if not answer_sheet.sheet_image:
+            return Response({"error": "Nenhuma imagem enviada."}, status=status.HTTP_400_BAD_REQUEST)
+
+        image_path = answer_sheet.sheet_image.path
+
+        try:
+            # Converte a imagem para base64
+            with open(image_path, "rb") as f:
+                image_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+            # Envia para o modelo GPT-4o com visão
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",  # ou "gpt-4o" se quiser mais precisão
+                response_format={"type": "json_object"},  # 🔥 força o modelo a responder com JSON puro
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Você é um sistema especialista em leitura automática de gabaritos de provas. "
+                            "Sua função é analisar imagens e retornar as respostas no formato JSON. "
+                            "Nunca inclua explicações, texto adicional ou blocos de código. "
+                            "Responda apenas com um JSON bem formatado."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Analise a imagem de um gabarito de prova. "
+                                    f"Este exame possui {answer_sheet.exam.num_questions} questões "
+                                    f"e {answer_sheet.exam.num_options} alternativas (A, B, C, D...). "
+                                    "Identifique qual alternativa está marcada em cada questão. "
+                                    "Se algum item estiver em branco, não o inclua. "
+                                    "O JSON deve seguir exatamente este formato:\n\n"
+                                    "{ \"sheet_code\": \"CÓDIGO\", \"answers\": { \"1\": \"A\", \"2\": \"B\", ... } }"
+                                )
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
+                            }
+                        ]
+                    },
+                ],
+                temperature=0,
+            )
+
+            result_text = response.choices[0].message.content
+
+            try:
+                result = json.loads(result_text)
+            except json.JSONDecodeError:
+                return Response({
+                    "error": "Falha ao interpretar a resposta da IA.",
+                    "raw_response": result_text
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # Atualiza o modelo com as respostas detectadas
+
+            answer_sheet = StudentAnswerSheet.objects.filter(sheet_code=result.get("sheet_code")).first()
+            if not answer_sheet:
+                return Response({
+                    "error": "Código do gabarito não reconhecido.",
+                    "sheet_code": result.get("sheet_code")
+                }, status=status.HTTP_400_BAD_REQUEST)
+            answer_sheet.sheet_code = result.get("sheet_code")
+            answer_sheet.student_answers = result.get("answers", {})
+            answer_sheet.sheet_image = answer_sheet.sheet_image
+
+            answer_sheet.save()
+
+            # Calcula o resultado
+            answer_sheet.calculate_result()
+
+            return Response({
+                "message": "Gabarito processado com sucesso pela IA.",
+                "sheet_code": answer_sheet.sheet_code,
+                "detected_answers": answer_sheet.student_answers,
+                "correct_items": answer_sheet.correct_items,
+                "incorrect_items": answer_sheet.incorrect_items,
+                "accuracy_percentage": float(answer_sheet.accuracy_percentage)
+            }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            return Response({
+                "error": f"Erro ao processar imagem com IA: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'])
+    def export_results(self, request):
+        """
+        Endpoint to export results to Excel.
+        """
+        from .utils.excel_exporter import export_detailed_results_to_excel, export_results_to_excel
+
+        exam_id = request.query_params.get('exam_id')
+        detailed = request.query_params.get('detailed', 'true').lower() == 'true'
+
+        if not exam_id:
+            return Response(
+                {'error': 'The exam_id parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            exam = Exam.objects.get(id=exam_id)
+        except Exam.DoesNotExist:
+            return Response(
+                {'error': 'Exam not found.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Generate the Excel file
+        if detailed:
+            excel_buffer = export_detailed_results_to_excel(exam)
+        else:
+            excel_buffer = export_results_to_excel(exam)
+
+        # Return the Excel as response
+        response = HttpResponse(
+            excel_buffer.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f'attachment; filename="results_{exam.subject_name}.xlsx"'
+        return response
