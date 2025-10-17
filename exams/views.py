@@ -1,6 +1,10 @@
 import base64
+import io
 
+import requests
+from PIL import Image as PilImage
 from openai import OpenAI
+from pdf2image import convert_from_bytes
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -57,47 +61,58 @@ class CorrectAnswerSheetViewSet(viewsets.ModelViewSet):
 
 
 class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for managing student answer sheets.
-    """
     queryset = StudentAnswerSheet.objects.all()
     serializer_class = StudentAnswerSheetSerializer
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
     filterset_fields = ['exam']
-    # ordering_fields = ['accuracy_percentage', 'correct_items', 'incorrect_items']
     search_fields = ['sheet_code']
 
     @action(detail=False, methods=['post'])
     def upload_answer_sheet(self, request):
-        request_image = request.data.get('sheet_image')
-        serializer = StudentAnswerSheetUploadSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        """
+        Processa um arquivo de imagem enviado diretamente,
+        sem usar serializer, e envia para a IA interpretar.
+        """
+        file = request.FILES.get('sheet_image')
+        exam_id = request.data.get('exam')
 
-        answer_sheet = serializer.save()
-
-        if not answer_sheet.sheet_image:
+        if not file:
             return Response({"error": "Nenhuma imagem enviada."}, status=status.HTTP_400_BAD_REQUEST)
-
-        image_path = answer_sheet.sheet_image.path
+        if not exam_id:
+            return Response({"error": "O campo 'exam' é obrigatório."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Converte a imagem para base64
-            with open(image_path, "rb") as f:
-                image_b64 = base64.b64encode(f.read()).decode("utf-8")
+            file_bytes = file.read()
 
-            # Envia para o modelo GPT-4o com visão
+            # Detecta tipo (PDF ou imagem)
+            content_type = getattr(file, 'content_type', '').lower()
+
+            if "pdf" in content_type or file.name.lower().endswith(".pdf"):
+                # Converte primeira página do PDF em imagem
+                images = convert_from_bytes(file_bytes)
+                if not images:
+                    raise ValueError("PDF sem páginas.")
+                image = images[0].convert("RGB")
+            else:
+                # Abre imagem comum (jpg, png, etc.)
+                image = PilImage.open(io.BytesIO(file_bytes)).convert("RGB")
+
+            # Converte para base64
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG")
+            buffer.seek(0)
+            image_b64 = base64.b64encode(buffer.read()).decode("utf-8")
+
+            # Envia para o modelo GPT-4o
             response = client.chat.completions.create(
-                model="gpt-4o",  # ou "gpt-4o" se quiser mais precisão
-                response_format={"type": "json_object"},  # 🔥 força o modelo a responder com JSON puro
+                model="gpt-4o",
+                response_format={"type": "json_object"},
                 messages=[
                     {
                         "role": "system",
                         "content": (
                             "Você é um sistema especialista em leitura automática de gabaritos de provas. "
-                            "Sua função é analisar imagens e retornar as respostas no formato JSON. "
-                            "Nunca inclua explicações, texto adicional ou blocos de código. "
-                            "Responda apenas com um JSON bem formatado."
+                            "Analise a imagem e retorne as respostas no formato JSON puro."
                         )
                     },
                     {
@@ -106,12 +121,10 @@ class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
                             {
                                 "type": "text",
                                 "text": (
-                                    "Analise a imagem de um gabarito de prova. "
-                                    f"Este exame possui algumas questões "
-                                    f"e alternativas (A, B, C, D, E...). "
-                                    "Identifique qual alternativa está marcada em cada questão. "
-                                    "Se algum item estiver em branco, incluir apenas ''. "
-                                    "O JSON deve seguir exatamente este formato:\n\n"
+                                    "Analise a imagem de um gabarito de prova e identifique "
+                                    "quais alternativas (A, B, C, D, E) estão marcadas. "
+                                    "Se alguma estiver em branco, use ''. "
+                                    "Retorne exatamente neste formato:\n\n"
                                     "{ \"sheet_code\": \"CÓDIGO\", \"answers\": { \"1\": \"A\", \"2\": \"B\", ... } }"
                                 )
                             },
@@ -126,7 +139,6 @@ class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
             )
 
             result_text = response.choices[0].message.content
-
             try:
                 result = json.loads(result_text)
             except json.JSONDecodeError:
@@ -135,22 +147,19 @@ class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
                     "raw_response": result_text
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # Atualiza o modelo com as respostas detectadas
-
+            # Salva o resultado no banco
             answer_sheet = StudentAnswerSheet.objects.filter(sheet_code=result.get("sheet_code")).first()
             if not answer_sheet:
-                return Response({
-                    "error": "Código do gabarito não reconhecido.",
-                    "sheet_code": result.get("sheet_code")
-                }, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {"error": "Código do gabarito não reconhecido.", "sheet_code": result.get("sheet_code")},
+                    status=status.HTTP_400_BAD_REQUEST)
+
             answer_sheet.sheet_code = result.get("sheet_code")
             answer_sheet.student_answers = result.get("answers", {})
             answer_sheet.sheet_image = request.data.get('sheet_image')
-
             answer_sheet.save()
-            answer_sheet.delete()
 
-            # Calcula o resultado
+            # Calcula o resultado do exame
             answer_sheet.calculate_result()
 
             return Response({
@@ -159,7 +168,7 @@ class StudentAnswerSheetViewSet(viewsets.ModelViewSet):
                 "detected_answers": answer_sheet.student_answers,
                 "correct_items": answer_sheet.correct_items,
                 "incorrect_items": answer_sheet.incorrect_items,
-                "accuracy_percentage": float(answer_sheet.accuracy_percentage)
+                "accuracy_percentage": float(answer_sheet.accuracy_percentage),
             }, status=status.HTTP_201_CREATED)
 
         except Exception as e:

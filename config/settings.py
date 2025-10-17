@@ -93,38 +93,38 @@ AWS_QUERYSTRING_AUTH = False
 # -------------------------------------
 # 📁 Arquivos estáticos e de mídia
 # -------------------------------------
-if DEBUG:
-    # Ambiente local
-    STATIC_URL = "/static/"
-    STATIC_ROOT = BASE_DIR / "staticfiles"
-    MEDIA_URL = "/media/"
-    MEDIA_ROOT = BASE_DIR / "media"
-else:
-    # Produção (Railway + Cloudflare R2)
-    STATIC_URL = f"{AWS_S3_ENDPOINT_URL}/{AWS_STORAGE_BUCKET_NAME}/static/"
-    MEDIA_URL = f"{AWS_S3_ENDPOINT_URL}/{AWS_STORAGE_BUCKET_NAME}/media/"
+# if DEBUG:
+#     # Ambiente local
+#     STATIC_URL = "/static/"
+#     STATIC_ROOT = BASE_DIR / "staticfiles"
+#     MEDIA_URL = "/media/"
+#     MEDIA_ROOT = BASE_DIR / "media"
+# else:
+# Produção (Railway + Cloudflare R2)
+STATIC_URL = f"{AWS_S3_ENDPOINT_URL}/{AWS_STORAGE_BUCKET_NAME}/static/"
+MEDIA_URL = f"{AWS_S3_ENDPOINT_URL}/{AWS_STORAGE_BUCKET_NAME}/media/"
 
-    STORAGES = {
-        "default": {
-            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-            "OPTIONS": {
-                "access_key": AWS_ACCESS_KEY_ID,
-                "secret_key": AWS_SECRET_ACCESS_KEY,
-                "bucket_name": AWS_STORAGE_BUCKET_NAME,
-                "endpoint_url": AWS_S3_ENDPOINT_URL,
-            },
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {
+            "access_key": AWS_ACCESS_KEY_ID,
+            "secret_key": AWS_SECRET_ACCESS_KEY,
+            "bucket_name": AWS_STORAGE_BUCKET_NAME,
+            "endpoint_url": AWS_S3_ENDPOINT_URL,
         },
-        "staticfiles": {
-            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-            "OPTIONS": {
-                "access_key": AWS_ACCESS_KEY_ID,
-                "secret_key": AWS_SECRET_ACCESS_KEY,
-                "bucket_name": AWS_STORAGE_BUCKET_NAME,
-                "endpoint_url": AWS_S3_ENDPOINT_URL,
-                "location": "static",
-            },
+    },
+    "staticfiles": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {
+            "access_key": AWS_ACCESS_KEY_ID,
+            "secret_key": AWS_SECRET_ACCESS_KEY,
+            "bucket_name": AWS_STORAGE_BUCKET_NAME,
+            "endpoint_url": AWS_S3_ENDPOINT_URL,
+            "location": "static",
         },
-    }
+    },
+}
 
 # -------------------------------------
 # 🔐 Validação de senha
